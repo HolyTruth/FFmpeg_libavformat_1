@@ -1,38 +1,39 @@
 # FFmpeg_libavformat_1
+# CVE 申请文案 — F1（HEIF tmap 断言崩溃）— 2026-11-15
 
 ## Vulnerability description
-FFmpeg master (commit 09382db7f5791362dcaf0f4f26fad2bb18cb0dcb) is prone to
-stack exhaustion via unbounded recursion in `parse_media_type()`
-(libavformat/wtvdec.c:643). When a WTV `SBE2_STREAM_DESC_EVENT` chunk carries
-the `ff_mediasubtype_cpfilters_processed` / `ff_format_cpfilters_processed`
-GUID pair, the function seeks back and recurses with (size-32) with no depth
-limit; recursion depth is bounded only by file size (≈ size/32 nesting
-levels). A crafted WTV file crashes any demuxing application with SIGSEGV —
-remote deterministic DoS. Minimum crash size measured on default 8 MB stack:
-29,200 nesting levels / 950,272 bytes (29,000 levels survives).
+FFmpeg master (commit 09382db7f5791362dcaf0f4f26fad2bb18cb0dcb) is prone to a
+reachable assertion abort in libavformat/mov.c when demuxing a crafted HEIF
+file. A `tmap` derived-image group whose `infe` item_id collides with a
+previously created video stream causes the item to hold both an AVStream and
+an AVStreamGroup, tripping `av_assert0(!st != !child_stg)` at
+libavformat/mov.c:11644. Any application demuxing untrusted input aborts
+(SIGABRT, exit 134) — deterministic denial of service. 416-byte testcase.
 
 ## Root cause (validated by human review and container reproduction)
-`parse_chunks()` (~wtvdec.c:801/:817) dispatches into `parse_media_type()`;
-the CPFilters-processed branch recurses on itself after skipping 32 bytes,
-without any recursion counter. The duplicate-sector FAT rejection
-(c7eefe19) is not involved — all sectors in the testcase are distinct.
+1. `mov_read_infe()` (mov.c:9639-9672) accepts duplicate item_ids; the
+   pre-existing AVStream is not removed on overwrite.
+2. The `tmap` group path (mov.c ~:11778) creates an AVStreamGroup and also
+   invokes `heif_add_stream` (~:5921), leaving both `st` and `child_stg` set.
+3. `av_assert0(!st != !child_stg)` (mov.c:11644) aborts on the both-set state.
+   Four sibling assertions of the same shape exist (mov.c:11814/11825/11915/11926).
 
 ## CWE
-CWE-674 (Uncontrolled Recursion) → stack exhaustion, CWE-400-class DoS.
+CWE-617 (Reachable Assertion) leading to CWE-400-class deterministic DoS.
 
 ## Affected product / versions
-- Product: FFmpeg, libavformat (wtvdec.c).
+- Product: FFmpeg, libavformat (mov.c / HEIF demuxer).
 - Verified present: upstream master 09382db7f5791362dcaf0f4f26fad2bb18cb0dcb
-  (2026-11-15); reproduction on 2026-11-12 snapshot, unmodified configure.
+  (2026-11-15) — code path confirmed; reproduction on 2026-11-12 snapshot
+  (post-n9.1), unmodified configure.
 - No release known to be fixed.
 
 ## Reproduction
-- Command: `ffprobe -v warning crash_cpfilters.wtv` (default 8 MB stack)
-- Testcase: crash_cpfilters.wtv (950,272 bytes ≈ 29,200 levels at minimum
-  crash size; 2,015,232-byte comfort variant also provided). Generator:
-  gen_wtv_deep.py.
-- Result: SIGSEGV, exit 139 (stack exhaustion). Recursion frames repeat at
-  wtvdec.c:643.
+- Command: `ffprobe -v warning crash.mp4`
+- Testcase: 416-byte crash.mp4; generator script gen_heif_tmap2.py.
+- Result: `Assertion !st != !child_stg failed at libavformat/mov.c:11644`
+  (SIGABRT, exit 134). Deterministic.
+
 
 ## References
 - Testcase + generator
